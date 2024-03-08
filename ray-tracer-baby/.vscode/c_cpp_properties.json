@@ -3,19 +3,19 @@
         {
             "name": "Linux",
             "includePath": [
-                "${workspaceFolder}/engine/src/**",
-                "${VULKAN_SDK}/include"
+                "${workspaceFolder}",
+                "${workspaceFolder}/include"
             ],
             "defines": [
                 "_DEBUG",
                 "_LOGGING",
+                "STB_IMAGE_WRITE_IMPLEMENTATION",
                 "UNICODE",
-                "_UNICODE",
-                "KEXPORT"
+                "_DEFAULT_SOURCE",
+                "_UNICODE"
             ],
-            "compilerPath": "/usr/bin/clang",
+            "compilerPath": "/usr/bin/clang-18",
             "cStandard": "c11",
-            "cppStandard": "c++17",
             "intelliSenseMode": "clang-x64"
         },
         {
