@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #define VIEW_MATRIX_LOCATION 0
 #define PROJECTION_MATRIX_LOCATION 1
