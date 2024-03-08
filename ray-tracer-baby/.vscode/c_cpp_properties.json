@@ -1,0 +1,46 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/engine/src/**",
+                "${VULKAN_SDK}/include"
+            ],
+            "defines": [
+                "_DEBUG",
+                "_LOGGING",
+                "UNICODE",
+                "_UNICODE",
+                "KEXPORT"
+            ],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "clang-x64"
+        },
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}",
+                "${workspaceFolder}/include",
+                "D:/dev/c/std-extended/include",
+                "D:/dev/vcpkg/installed/x64-windows/include",
+                "D:/embree-3.13.5/include",
+                "C:/Program Files (x86)/Intel/oneAPI/2024.0/include"
+            ],
+            "defines": [
+                "_DEBUG",
+                "_LOGGING",
+                "STB_IMAGE_WRITE_IMPLEMENTATION",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "windowsSdkVersion": "10.0.22621.0",
+            "compilerPath": "C:/Program Files (x86)/Intel/oneAPI/2024.0/bin/icx.exe",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "clang-x64"
+        }
+    ],
+    "version": 4
+}
