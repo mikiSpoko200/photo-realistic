@@ -239,7 +239,7 @@ int main(void) {
 
     PRINTLN("Initialized OpenGL context: %s core", (const char*) glGetString(GL_VERSION));
 
-    const char* const objPaths[] = { "D:/dev/CUDA/simpleCUDA2GL/objects/sphere.obj" };
+    const char* const objPaths[] = { "../scenes/sphere.obj" };
 
     const RendererConfig config = {
         .nMeshes = ARRAY_LENGTH(objPaths),
@@ -440,7 +440,7 @@ int main(void) {
 
     while(1) { 
         glDrawArrays(GL_TRIANGLES, 0, 3); GL_ASSERT_NO_ERROR;
-        LOGF("Drawing ...");
+        LOGFM("Drawing ...");
 
         glfwSwapBuffers(window);
     }
