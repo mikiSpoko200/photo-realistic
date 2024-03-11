@@ -5,6 +5,7 @@
 #include "vec3_utilities.h"
 
 #define RNG_SEED 42
+#define REC(x) (1.f / x)
 
 typedef void (*Reflect)(vec3, const vec3);
 
@@ -22,13 +23,13 @@ typedef void (*Reflect)(vec3, const vec3);
 // };
 
 void CreateLambertian(Material* const material, const vec3 albedo, const f32 matte) {
-    material->type = MaterialTypeMetallic;
+    material->type = MaterialTypeLambertian;
     glm_vec3_copy(albedo, material->albedo);
     material->params.lambertian.matte = matte;
 }
 
 void CreateMetallic(Material* const material, const vec3 albedo, const f32 roughness) {
-    material->type = MaterialTypeLambertian;
+    material->type = MaterialTypeMetallic;
     glm_vec3_copy(albedo, material->albedo);
     material->params.metallic.roughness = roughness;
 }
@@ -39,18 +40,11 @@ internal void Scatter(in out struct RTCRayHit* const rayHit, const Reflect refle
     glm_vec3_scale(&rayHit->ray.dir_x, rayHit->ray.tfar, hit);
     glm_vec3_add(hit, &rayHit->ray.org_x, hit);
 
-    COMMENT(Calculate reflected direction)
+    // Calculate reflected direction
     reflect(&rayHit->ray.dir_x, &rayHit->hit.Ng_x);
 
-    COMMENT(Update ray origin)
+    // Update ray origin
     glm_vec3_copy(hit, &rayHit->ray.org_x);
-    
-    // offset origin to prevent intersetion with hit geometry
-    // vec3 offset;
-    // glm_vec3_copy(&rayHit->ray.dir_x, offset);
-    // glm_vec3_norm(offset);
-    // glm_vec3_scale(offset, 0.001f, offset);
-    // glm_vec3_add(offset, &rayHit->ray.org_x, &rayHit->ray.org_x);
 }
 
 /// Scatter incoming ray using lambertian distribution.
@@ -100,7 +94,8 @@ void TraceRay(
         const usize instanceId = rayHit->hit.instID[0];
         const Material* const material = instanceId == RTC_INVALID_GEOMETRY_ID 
         ? &DefaultMaterial
-        : &rayTracer->materials.data[instanceId];
+        : &rayTracer->materials.data[instanceId]
+        ;
 
         Reflect reflect;
         switch (material->type) {
@@ -119,7 +114,9 @@ void TraceRay(
             case MaterialTypeLambertian: {
                 glm_vec3_scale(color, material->params.lambertian.matte, color);
                 TraceRay(rayTracer, rayHit, nReflections + 1, color);
+                glm_vec3_mul(color, material->albedo, color);
             } break;
+            default:
             case MaterialTypeMetallic: {
                 PANICM("unimplemented");
             } break;

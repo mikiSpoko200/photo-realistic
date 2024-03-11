@@ -5,7 +5,7 @@ DEBUG_FLAGS := -D_DEBUG -D_LOGGING -D_DEFAULT_SOURCE -DSTB_IMAGE_WRITE_IMPLEMENT
 RELEASE_FLAGS := -O2
 
 # Directories
-INCLUDE := -I./include -I./
+INCLUDE := -I./include -I./ -I./include/cmm
 SRC_DIR := ./src
 TARGET_DIR := ./target
 
@@ -27,7 +27,7 @@ endif
 C_OBJS := $(patsubst %.c,$(TARGET_PATH)/%.o,$(notdir $(C_SRCS)))
 
 RUST_LIB := ../obj-rs/target/release/libobj.a
-LIBS := embree3 glfw GL GLEW cglm m
+LIBS := embree3 glfw GL GLEW cglm m pthread dl
 
 ASSEMBLY := ray-tracer-baby
 TARGET := $(TARGET_PATH)/$(ASSEMBLY)

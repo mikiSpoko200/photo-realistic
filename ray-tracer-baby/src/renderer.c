@@ -187,23 +187,25 @@ internal void InitializeLighting(void) {
 
 void RendererInitialize(const RendererConfig config) {
     LOGLNM("Initializing renderer");
-    glEnable(GL_DEBUG_OUTPUT);
-    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+    if (config.useGl) {
+        glEnable(GL_DEBUG_OUTPUT);
+        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
 
-    LOGLN("Setting clear color to RGBA:" FSA(f32, 4), 0.1255f, 0.2039f, 0.2275f, 1.0f);
-    glClearColor(0.1255f, 0.2039f, 0.2275f, 1.0f);
+        LOGLN("Setting clear color to RGBA:" FSA(f32, 4), 0.1255f, 0.2039f, 0.2275f, 1.0f);
+        glClearColor(0.1255f, 0.2039f, 0.2275f, 1.0f);
 
-    LOGLNM("Compiling shaders");
-    if ((Renderer.program = CreateProgram(config.vs, config.fs)) == 0) {
-        PANICM("Program creation failed");
+        LOGLNM("Compiling shaders");
+        if ((Renderer.program = CreateProgram(config.vs, config.fs)) == 0) {
+            PANICM("Program creation failed");
+        }
+
+        glUseProgram(Renderer.program);
+
+        LOGLNM("Initializing Camera");
+        InitializeCamera();
+        LOGLNM("Initializing Lighting");
+        InitializeLighting();
     }
-
-    glUseProgram(Renderer.program);
-
-    LOGLNM("Initializing Camera");
-    InitializeCamera();
-    LOGLNM("Initializing Lighting");
-    InitializeLighting();
 
     Renderer.meshes = AllocateArray(Mesh, config.nMeshes);
     Renderer.byteOffsets = (Offsets*)malloc(Renderer.meshes.len * sizeof(Offsets));
@@ -219,6 +221,10 @@ void RendererInitialize(const RendererConfig config) {
         totalIndexSize += OBJ(i).nIndices * sizeof(u16);
         totalVertexSize += OBJ(i).nVertices * sizeof(Vertex);
 
+        LOGLN("Allocating" FS(usize) "MB for mesh vertices", MB(MAX_INSTANCES * MAX_MESHES * sizeof(Instance)));
+        LOGLN("Allocating" FS(usize) "bytes for mesh indexes", totalIndexSize);
+
+
         if (i > 0) {
             VERTEX_BYTE_OFFSET(i) =
                 VERTEX_BYTE_OFFSET(i - 1) // offset by however much the previous object was offset
@@ -227,121 +233,123 @@ void RendererInitialize(const RendererConfig config) {
         }
     }
 
-    glCreateBuffers(1, &Renderer.meshVbo);
-    glCreateBuffers(1, &Renderer.instanceVbo);
-    glCreateBuffers(1, &Renderer.ebo);
-    glCreateVertexArrays(1, &Renderer.vao);
+    if (config.useGl) {
+        glCreateBuffers(1, &Renderer.meshVbo);
+        glCreateBuffers(1, &Renderer.instanceVbo);
+        glCreateBuffers(1, &Renderer.ebo);
+        glCreateVertexArrays(1, &Renderer.vao);
 
-    glBindVertexArray(Renderer.vao);
+        glBindVertexArray(Renderer.vao);
 
-    const usize last = Renderer.meshes.len - 1;
+        const usize last = Renderer.meshes.len - 1;
 
-    ASSERT_EQ(totalVertexSize, VERTEX_BYTE_OFFSET(last) + VERTEX_BYTE_SIZE(last));
-    ASSERT_EQ(totalIndexSize, INDEX_BYTE_OFFSET(last) + INDEX_BYTE_SIZE(last));
+        ASSERT_EQ(totalVertexSize, VERTEX_BYTE_OFFSET(last) + VERTEX_BYTE_SIZE(last));
+        ASSERT_EQ(totalIndexSize, INDEX_BYTE_OFFSET(last) + INDEX_BYTE_SIZE(last));
 
-    // Allocate instance buffer
-    LOGLN("Allocating" FS(usize) "MB for mesh vertices", MB(MAX_INSTANCES * MAX_MESHES * sizeof(Instance)));
-    glBindBuffer(GL_ARRAY_BUFFER, Renderer.instanceVbo);
-    glBufferData(GL_ARRAY_BUFFER, MAX_INSTANCES * MAX_MESHES * sizeof(Instance), NULL, GL_DYNAMIC_DRAW);
+        // Allocate instance buffer
+        LOGLN("Allocating" FS(usize) "MB for mesh vertices", MB(MAX_INSTANCES * MAX_MESHES * sizeof(Instance)));
+        glBindBuffer(GL_ARRAY_BUFFER, Renderer.instanceVbo);
+        glBufferData(GL_ARRAY_BUFFER, MAX_INSTANCES * MAX_MESHES * sizeof(Instance), NULL, GL_DYNAMIC_DRAW);
 
-    // Allocate model vertex buffer
-    LOGLN("Allocating" FS(usize) "bytes for mesh vertices", totalVertexSize);
-    glBindBuffer(GL_ARRAY_BUFFER, Renderer.meshVbo);
-    glBufferData(GL_ARRAY_BUFFER, totalVertexSize, NULL, GL_STATIC_DRAW);
-    // Allocate model index buffer
-    LOGLN("Allocating" FS(usize) "bytes for mesh indexes", totalIndexSize);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, Renderer.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, totalIndexSize, NULL, GL_STATIC_DRAW);
+        // Allocate model vertex buffer
+        LOGLN("Allocating" FS(usize) "bytes for mesh vertices", totalVertexSize);
+        glBindBuffer(GL_ARRAY_BUFFER, Renderer.meshVbo);
+        glBufferData(GL_ARRAY_BUFFER, totalVertexSize, NULL, GL_STATIC_DRAW);
+        // Allocate model index buffer
+        LOGLN("Allocating" FS(usize) "bytes for mesh indexes", totalIndexSize);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, Renderer.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, totalIndexSize, NULL, GL_STATIC_DRAW);
 
-    LOGLNM("Uploading meshes to GPU");
-    for (usize i = 0; i < Renderer.meshes.len; i++) {
-        LOGLN("  Mesh" FS(usize) "--" FS(usize) "bytes", i, VERTEX_BYTE_SIZE(i));
-        glBufferSubData(GL_ARRAY_BUFFER, VERTEX_BYTE_OFFSET(i), VERTEX_BYTE_SIZE(i), OBJ(i).vertices);
-        GL_ASSERT_NO_ERROR;
-		glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, INDEX_BYTE_OFFSET(i), INDEX_BYTE_SIZE(i), OBJ(i).indices);
-        GL_ASSERT_NO_ERROR;
+        LOGLNM("Uploading meshes to GPU");
+        for (usize i = 0; i < Renderer.meshes.len; i++) {
+            LOGLN("  Mesh" FS(usize) "--" FS(usize) "bytes", i, VERTEX_BYTE_SIZE(i));
+            glBufferSubData(GL_ARRAY_BUFFER, VERTEX_BYTE_OFFSET(i), VERTEX_BYTE_SIZE(i), OBJ(i).vertices);
+            GL_ASSERT_NO_ERROR;
+            glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, INDEX_BYTE_OFFSET(i), INDEX_BYTE_SIZE(i), OBJ(i).indices);
+            GL_ASSERT_NO_ERROR;
+        }
+
+        // Configure vertex array pointers
+
+        // Configure meshes
+        LOGLNM("Configuring mesh attributes");
+        glVertexAttribPointer(POSITION_LOCATION, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+        glEnableVertexAttribArray(POSITION_LOCATION);
+        LOGLN ("  Vertex::Location   :" FS(u32), POSITION_LOCATION);
+        LOGLN ("  Vertex::Size       :" FS(i32), 3);
+        LOGLN ("  Vertex::Type       : %s" , STRINGIFY(GL_FLOAT));
+        LOGLN ("  Vertex::Normalized : %s" , STRINGIFY(GL_FALSE));
+        LOGLN ("  Vertex::Stride     :" FS(usize), sizeof(Vertex));
+        LOGLN ("  Vertex::Offset     :" FS(u32), 0);
+
+        glVertexAttribPointer(NORMAL_INDEX, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)sizeof(Position));  // NOLINT(performance-no-int-to-ptr)
+        glEnableVertexAttribArray(NORMAL_INDEX);
+        LOGLN ("  Normal::Location   :" FS(u32), NORMAL_INDEX);
+        LOGLN ("  Normal::Size       :" FS(i32), 3);
+        LOGLN ("  Normal::Type       : %s" , STRINGIFY(GL_FLOAT));
+        LOGLN ("  Normal::Normalized : %s" , STRINGIFY(GL_FALSE));
+        LOGLN ("  Normal::Stride     :" FS(usize), sizeof(Vertex));
+        LOGLN ("  Normal::Offset     :" FS(usize), sizeof(Position));
+
+        // Configure instance parameters
+        glBindBuffer(GL_ARRAY_BUFFER, Renderer.instanceVbo);
+        glVertexAttribPointer(MODEL_LOCATION + 0, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)0);
+        glVertexAttribPointer(MODEL_LOCATION + 1, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 4));
+        glVertexAttribPointer(MODEL_LOCATION + 2, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 8));
+        glVertexAttribPointer(MODEL_LOCATION + 3, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 12));
+        glVertexAttribPointer(ALBEDO_LOCATION   , 3, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 16));
+        glVertexAttribPointer( ROUGHNESS_LOCATION, 1, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 19));
+        glVertexAttribPointer(FRESNEL_FACTOR__LOCATION, 1, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 20));
+        glEnableVertexAttribArray(MODEL_LOCATION + 0);
+        glEnableVertexAttribArray(MODEL_LOCATION + 1);
+        glEnableVertexAttribArray(MODEL_LOCATION + 2);
+        glEnableVertexAttribArray(MODEL_LOCATION + 3);
+        glEnableVertexAttribArray(ALBEDO_LOCATION);
+        glEnableVertexAttribArray( ROUGHNESS_LOCATION);
+        glEnableVertexAttribArray(FRESNEL_FACTOR__LOCATION);
+        glVertexAttribDivisor(MODEL_LOCATION + 0, 1);
+        glVertexAttribDivisor(MODEL_LOCATION + 1, 1);
+        glVertexAttribDivisor(MODEL_LOCATION + 2, 1);
+        glVertexAttribDivisor(MODEL_LOCATION + 3, 1);
+        glVertexAttribDivisor(MODEL_LOCATION + 0, 1);
+        glVertexAttribDivisor(ALBEDO_LOCATION, 1);
+        glVertexAttribDivisor(ROUGHNESS_LOCATION, 1);
+        glVertexAttribDivisor(FRESNEL_FACTOR__LOCATION, 1);
+
+    #ifdef INVERTED_NORMALS
+        glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 0, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)0);
+        glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 1, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 4));
+        glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 2, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 8));
+        glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 3, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 12));
+        glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 0);
+        glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 1);
+        glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 2);
+        glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 3);
+        glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 0, 1);
+        glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 1, 1);
+        glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 2, 1);
+        glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 3, 1);
+    #endif
+
+        LOGLNM("Enabling depth test");
+        glEnable(GL_DEPTH_TEST);
+        LOGLNM("Enabling face culling");
+        glEnable(GL_CULL_FACE);
+
+        LOGLNM("Loading uniforms");
+        glUniformMatrix4fv(VIEW_MATRIX_LOCATION      , 1, GL_FALSE, (f32*)Renderer.view);
+        glUniformMatrix4fv(PROJECTION_MATRIX_LOCATION, 1, GL_FALSE, (f32*)Renderer.perspective);
+        glUniform3f(VIEW_POSITION_LOCATION,  FSA_UNROLL(Renderer.camera.position, 3));
+        glUniform3f(LIGHT_POSITION_LOCATION, FSA_UNROLL(Renderer.lightPosition, 3));
+        glUniform3f(LIGHT_COLOR_LOCATION,    FSA_UNROLL(Renderer.lightColor, 3));
+
+        const f32 lineWidth = 1.f;
+        LOGLN("Setting wire-frame line width to" FS(f32), lineWidth);
+        glLineWidth(lineWidth); GL_ASSERT_NO_ERROR;
+        f32 width;
+        glGetFloatv(GL_LINE_WIDTH, &width);
+        LOGLN("Checking line width:" FS(f32), width);
     }
-
-    // Configure vertex array pointers
-
-    // Configure meshes
-    LOGLNM("Configuring mesh attributes");
-    glVertexAttribPointer(POSITION_LOCATION, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
-    glEnableVertexAttribArray(POSITION_LOCATION);
-    LOGLN ("  Vertex::Location   :" FS(u32), POSITION_LOCATION);
-    LOGLN ("  Vertex::Size       :" FS(i32), 3);
-    LOGLN ("  Vertex::Type       : %s" , STRINGIFY(GL_FLOAT));
-    LOGLN ("  Vertex::Normalized : %s" , STRINGIFY(GL_FALSE));
-    LOGLN ("  Vertex::Stride     :" FS(usize), sizeof(Vertex));
-    LOGLN ("  Vertex::Offset     :" FS(u32), 0);
-
-    glVertexAttribPointer(NORMAL_INDEX, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)sizeof(Position));  // NOLINT(performance-no-int-to-ptr)
-    glEnableVertexAttribArray(NORMAL_INDEX);
-    LOGLN ("  Normal::Location   :" FS(u32), NORMAL_INDEX);
-    LOGLN ("  Normal::Size       :" FS(i32), 3);
-    LOGLN ("  Normal::Type       : %s" , STRINGIFY(GL_FLOAT));
-    LOGLN ("  Normal::Normalized : %s" , STRINGIFY(GL_FALSE));
-    LOGLN ("  Normal::Stride     :" FS(usize), sizeof(Vertex));
-    LOGLN ("  Normal::Offset     :" FS(usize), sizeof(Position));
-
-    // Configure instance parameters
-    glBindBuffer(GL_ARRAY_BUFFER, Renderer.instanceVbo);
-    glVertexAttribPointer(MODEL_LOCATION + 0, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)0);
-    glVertexAttribPointer(MODEL_LOCATION + 1, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 4));
-    glVertexAttribPointer(MODEL_LOCATION + 2, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 8));
-    glVertexAttribPointer(MODEL_LOCATION + 3, 4, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 12));
-    glVertexAttribPointer(ALBEDO_LOCATION   , 3, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 16));
-    glVertexAttribPointer( ROUGHNESS_LOCATION, 1, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 19));
-    glVertexAttribPointer(FRESNEL_FACTOR__LOCATION, 1, GL_FLOAT, GL_FALSE, sizeof(Instance), (void*)(sizeof(f32) * 20));
-    glEnableVertexAttribArray(MODEL_LOCATION + 0);
-    glEnableVertexAttribArray(MODEL_LOCATION + 1);
-    glEnableVertexAttribArray(MODEL_LOCATION + 2);
-    glEnableVertexAttribArray(MODEL_LOCATION + 3);
-    glEnableVertexAttribArray(ALBEDO_LOCATION);
-    glEnableVertexAttribArray( ROUGHNESS_LOCATION);
-    glEnableVertexAttribArray(FRESNEL_FACTOR__LOCATION);
-    glVertexAttribDivisor(MODEL_LOCATION + 0, 1);
-    glVertexAttribDivisor(MODEL_LOCATION + 1, 1);
-    glVertexAttribDivisor(MODEL_LOCATION + 2, 1);
-    glVertexAttribDivisor(MODEL_LOCATION + 3, 1);
-    glVertexAttribDivisor(MODEL_LOCATION + 0, 1);
-    glVertexAttribDivisor(ALBEDO_LOCATION, 1);
-    glVertexAttribDivisor(ROUGHNESS_LOCATION, 1);
-    glVertexAttribDivisor(FRESNEL_FACTOR__LOCATION, 1);
-
-#ifdef INVERTED_NORMALS
-    glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 0, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)0);
-    glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 1, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 4));
-    glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 2, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 8));
-    glVertexAttribPointer(TRANSPOSE_INVERSE_MODEL_LOCATION + 3, 4, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4 * 4, (void*)(sizeof(float) * 12));
-    glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 0);
-    glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 1);
-    glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 2);
-    glEnableVertexAttribArray(TRANSPOSE_INVERSE_MODEL_LOCATION + 3);
-    glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 0, 1);
-    glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 1, 1);
-    glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 2, 1);
-    glVertexAttribDivisor(TRANSPOSE_INVERSE_MODEL_LOCATION + 3, 1);
-#endif
-
-    LOGLNM("Enabling depth test");
-    glEnable(GL_DEPTH_TEST);
-    LOGLNM("Enabling face culling");
-    glEnable(GL_CULL_FACE);
-
-    LOGLNM("Loading uniforms");
-    glUniformMatrix4fv(VIEW_MATRIX_LOCATION      , 1, GL_FALSE, (f32*)Renderer.view);
-    glUniformMatrix4fv(PROJECTION_MATRIX_LOCATION, 1, GL_FALSE, (f32*)Renderer.perspective);
-    glUniform3f(VIEW_POSITION_LOCATION,  FSA_UNROLL(Renderer.camera.position, 3));
-    glUniform3f(LIGHT_POSITION_LOCATION, FSA_UNROLL(Renderer.lightPosition, 3));
-    glUniform3f(LIGHT_COLOR_LOCATION,    FSA_UNROLL(Renderer.lightColor, 3));
-
-    const f32 lineWidth = 1.f;
-    LOGLN("Setting wire-frame line width to" FS(f32), lineWidth);
-    glLineWidth(lineWidth); GL_ASSERT_NO_ERROR;
-    f32 width;
-    glGetFloatv(GL_LINE_WIDTH, &width);
-    LOGLN("Checking line width:" FS(f32), width);
 }
 
 void Render(void) {
@@ -389,10 +397,10 @@ void CreateInstance(Transform* const transform, const MaterialRaster* const mate
 
     mat4 scaleMatrix;
     glm_scale_make(scaleMatrix, transform->scale);
-    glm_mat4_mul(scaleMatrix, rotationMatrix, rotationMatrix);
-    glm_mat4_mul(rotationMatrix, translationMatrix, translationMatrix);
+    
+    glm_mat4_mul(translationMatrix, rotationMatrix, Instance->model);
+    glm_mat4_mul(Instance->model, scaleMatrix, Instance->model);
 
-    glm_mat4_copy(translationMatrix, Instance->model);
     Instance->material = *material;
 }
 

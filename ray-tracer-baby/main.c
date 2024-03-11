@@ -4,6 +4,9 @@
 #include <limits.h>
 #include <stdio.h>
 
+#include <pthread.h>
+#include <unistd.h>
+
 #include <embree3/rtcore.h>
 
 #include <GL/glew.h>
@@ -16,9 +19,8 @@
 #include "renderer.h"
 #include "shaders.h"
 #include "ray_tracing.h"
+#include "progress_bar.h"
 
-
-DeclareArray(vec3);
 
 #define RNG_SEED 42
 
@@ -30,11 +32,14 @@ DeclareArray(vec3);
 internal struct Config {
     int glVersionMajor;
     int glVersionMinor;
+    usize nWorkers;
+    const char* const title;
 } Config = {
     .glVersionMajor = 4,
-    .glVersionMinor = 2
+    .glVersionMinor = 2,
+    .nWorkers = 8,
+    .title = "ray-tracer-baby",
 };
-
 
 internal void ErrorCallback(int _, const char* const description) {
     const isize result = fputs(description, stderr);
@@ -54,7 +59,6 @@ void EmbreeErrorCallback(void* const _, enum RTCError error, const char* const s
 internal struct AppState {
     const usize width;
     const usize height;
-    const char* const title;
     bool glInitialized;
     struct {
         bool forward;
@@ -66,16 +70,17 @@ internal struct AppState {
         bool wireFrame;
         bool leftCtrl;
     } keyStates;
+    bool windowedMode;
     bool cursorDisabled;
     GLFWwindow* window;
     f64 xPos;
     f64 yPos;
 } AppState = {
     .width = 800,
-    .height = 600,
-    .title = "ray-tracer-baby",
+    .height = 800,
     .glInitialized = false,
-    .cursorDisabled = false, // toggle it during initialization
+    .cursorDisabled = false,
+    .windowedMode = false
 };
 
 internal f32 Palette1[8][3] = {
@@ -169,21 +174,12 @@ internal void HandleKey(GLFWwindow* window, const i32 key, const i32 scancode, c
 
 void CheckOpenGLError(const char* stmt, const char* fname, int line)
 {
-    GLenum err = glGetError();
+    const u32 err = glGetError();
     if (err != GL_NO_ERROR) {
         printf("OpenGL error %08x, at %s:%i - for %s\n", err, fname, line, stmt);
         abort();
     }
 }
-
-#ifdef _DEBUG
-    #define GL_CHECK(stmt) do { \
-            stmt; \
-            CheckOpenGLError(#stmt, __FILE__, __LINE__); \
-        } while (0)
-#else
-    #define GL_CHECK(stmt) stmt
-#endif
 
 internal void ProcessInput(void) {
     PROCESS_INPUT(forward, true);
@@ -205,94 +201,193 @@ internal void ProcessInput(void) {
 
 DeclareArray(RTCGeometry);
 
-int main(void) {
-    glfwSetErrorCallback(ErrorCallback);
+u32 createGroundPlane (RTCDevice device, RTCScene scene) {
+    /* create a triangulated plane with 2 triangles and 4 vertices */
+    RTCGeometry geom = rtcNewGeometry (device, RTC_GEOMETRY_TYPE_TRIANGLE);
 
-    if (!glfwInit()) {
-        fprintf(stderr, "GLFW initialization failed\n");
-        exit(EXIT_FAILURE);
+    /* set vertices */
+    Position* vertices = (Position*) rtcSetNewGeometryBuffer(geom,RTC_BUFFER_TYPE_VERTEX,0,RTC_FORMAT_FLOAT3,sizeof(Position),4);
+    vertices[0].x = -10; vertices[0].y = -2; vertices[0].z = -10;
+    vertices[1].x = -10; vertices[1].y = -2; vertices[1].z = +10;
+    vertices[2].x = +10; vertices[2].y = -2; vertices[2].z = -10;
+    vertices[3].x = +10; vertices[3].y = -2; vertices[3].z = +10;
+
+    /* set triangles */
+    vec3* triangles = (vec3*) rtcSetNewGeometryBuffer(geom,RTC_BUFFER_TYPE_INDEX,0,RTC_FORMAT_UINT3,sizeof(vec3),2);
+    triangles[0][0] = 0; triangles[0][1] = 1; triangles[0][2] = 2;
+    triangles[1][0] = 1; triangles[1][1] = 3; triangles[1][2] = 2;
+
+    rtcCommitGeometry(geom);
+    u32 geomID = rtcAttachGeometry(scene,geom);
+    rtcReleaseGeometry(geom);
+    return geomID;
+}
+
+typedef struct {
+    RayTracer* rt;
+    Buffer2d framebuffer;
+    usize tid;
+    PTask* task;
+} RenderJobParams;
+
+DeclareArray(RenderJobParams);
+
+void RenderRange(const RayTracer* const rt, Buffer2d framebuffer, usize initialRow, usize nRows, PTask* task) {
+    for (usize y = initialRow; y < initialRow + nRows; y++) {
+        task->progress += 1;
+        for (usize x = 0; x < framebuffer.width; x++) {
+            struct RTCRayHit rayhit;
+            f32 accumulator[3] = { 0.f };
+            vec3 color;
+
+            for (usize ri = 0; ri < rt->nRaysPerSample; ri++) {
+                rayhit.ray.org_x = 0.0f;
+                rayhit.ray.org_y = 0.0f;
+                rayhit.ray.org_z = 1.0f;
+
+                rayhit.ray.dir_x = (2.0f * ((f32)x / AppState.width)) - 1.0f;
+                rayhit.ray.dir_y = 1.0f - (2.0f * ((f32)y / AppState.height));
+                rayhit.ray.dir_z = -1.0f;
+                rayhit.ray.tnear = 0.001f;
+                rayhit.ray.tfar = INFINITY;
+                rayhit.ray.mask = 0xFFFFFFFF;
+                rayhit.ray.flags = 0;
+                rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+                
+                glm_vec3_one(color);
+                TraceRay(rt, &rayhit, 0, color);
+                
+                accumulator[X] += color[X];
+                accumulator[Y] += color[Y];
+                accumulator[Z] += color[Z];
+            }
+            glm_vec3_scale(accumulator, 1.f / rt->nRaysPerSample, accumulator);
+            framebuffer.buffer[y * framebuffer.width + x][X] = (u8)(accumulator[X] * 255.999f);
+            framebuffer.buffer[y * framebuffer.width + x][Y] = (u8)(accumulator[Y] * 255.999f);
+            framebuffer.buffer[y * framebuffer.width + x][Z] = (u8)(accumulator[Z] * 255.999f);
+        }
     }
+}
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Config.glVersionMajor);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Config.glVersionMinor);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#ifdef _DEBUG
-    glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, true);
-#endif
+internal void* RenderJob(void* args) {
+    RenderJobParams* const params = args;
 
-    GLFWwindow* const window = glfwCreateWindow((i32)AppState.width, (i32)AppState.height, AppState.title, NULL, NULL);
-    if (window == NULL) {
-        fprintf(stdout, "GLFW window creation failed\n");
-        glfwTerminate();
-        exit(EXIT_FAILURE);
+    ASSERT_EQ(params->framebuffer.height % Config.nWorkers, 0);
+    const usize offset = params->framebuffer.height / Config.nWorkers;
+
+    const usize initialRow = params->tid * offset;
+    params->task->end = offset;
+    params->task->progress = 0;
+    RenderRange(params->rt, params->framebuffer, initialRow, offset, params->task);
+    return NULL;
+}
+
+DeclareArray(pthread_t);
+
+void SceneNxN(Instances instances, usize n) {
+    const isize h = n / 2;
+    Material _;
+    Transform transform;
+    for (usize i = 0; i < n * n; i++) {
+        const f32 norm = (f32)i / (f32)(n * n);
+        const isize xi = i % n - h;
+        const isize yi = (i / n) % n - h;
+        const isize zi = -1;
+
+        glm_vec3_copy((vec3) { (f32)xi, (f32)yi, (f32)zi + 0.3 }, transform.translation);
+        glm_vec3_copy((vec3) { 0.f, norm * M_PI, 0.f }, transform.rotation);
+        glm_vec3_copy((vec3) { 0.3f, 0.3f, 0.3f }, transform.scale);
+        CreateInstance(
+            &transform,
+            &_,
+            &instances.data[i]
+        );
     }
-    AppState.window = window;
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    glfwMakeContextCurrent(window);
+}
 
-    const GLenum err = glewInit();
-    if (GLEW_OK != err) PANIC("Error: %s\n", glewGetErrorString(err));
-    PRINTLN("Status: Using GLEW %s\n", glewGetString(GLEW_VERSION));
+i32 main(void) {
+    PRINTLN(FS(usize), __STDC_VERSION__);
+    const char* const objPaths[] = { "../scenes/backpack.obj" };
 
-    AppState.glInitialized = true;
+    if (AppState.windowedMode) {
+        LOGLNM("Running in windowed mode");
 
-    PRINTLN("Initialized OpenGL context: %s core", (const char*) glGetString(GL_VERSION));
+        glfwSetErrorCallback(ErrorCallback);
+        if (!glfwInit()) {
+            fprintf(stderr, "GLFW initialization failed\n");
+            exit(EXIT_FAILURE);
+        }
 
-    const char* const objPaths[] = { "../scenes/sphere.obj" };
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Config.glVersionMajor);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Config.glVersionMinor);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    #ifdef _DEBUG
+        glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, true);
+    #endif
+
+        GLFWwindow* const window = glfwCreateWindow((i32)AppState.width, (i32)AppState.height, Config.title, NULL, NULL);
+        
+        if (window == NULL) {
+            fprintf(stdout, "GLFW window creation failed\n");
+            glfwTerminate();
+            exit(EXIT_FAILURE);
+        }
+        AppState.window = window;
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        glfwMakeContextCurrent(window);
+        
+        const GLenum err = glewInit();
+        if (GLEW_OK != err) PANIC("Error: %s\n", glewGetErrorString(err));
+        PRINTLN("Status: Using GLEW %s\n", glewGetString(GLEW_VERSION));
+
+        AppState.glInitialized = true;
+
+        glfwSetKeyCallback(window, HandleKey);
+        glfwSetCursorPosCallback(window, HandleMouse);
+        ToggleCursorMode();
+
+        glfwGetCursorPos(window, &AppState.xPos, &AppState.yPos);
+        glfwSwapInterval(0);
+        PRINTLN("Initialized OpenGL context: %s core", (const char*) glGetString(GL_VERSION));
+    } else {
+        LOGLNM("Running in console mode");
+    }
 
     const RendererConfig config = {
         .nMeshes = ARRAY_LENGTH(objPaths),
         .objPaths = objPaths,
         .vs = vs,
-        .fs = fs
+        .fs = fs,
+        .useGl = AppState.windowedMode,
     };
     Renderer.initialize(config);
 
-    glfwSetKeyCallback(window, HandleKey);
-    glfwSetCursorPosCallback(window, HandleMouse);
-    ToggleCursorMode();
-
-    glfwGetCursorPos(window, &AppState.xPos, &AppState.yPos);
-    glfwSwapInterval(0);
     usize frameCount = 0;
     f64 lastUpdate = 0.0;
 
-
     COMMENT(--------========[ Create Instances ]========--------)
 
-    const usize nInstances = 25;
+    const usize nInstancesInRow = 3;
+    const usize nInstances = nInstancesInRow * nInstancesInRow;
 
     Transform transform = {};
     MaterialRaster material;
-    const Instances instances = AllocateArray(Instance, nInstances);
-    for (usize i = 0; i < nInstances; i++) {
-        const f32 ratio = (f32)(i + 1) / ((f32)nInstances + 1.f);
-        glm_vec3_copy((vec3) { ratio, 1.f - ratio, (f32)fabs(0.5f - ratio) }, material.albedo);
+    Instances instances = AllocateArray(Instance, nInstances);
+    SceneNxN(instances, nInstancesInRow);
 
-        const usize xi = i % 5 + 5;
-        const usize yi = (i / 5) % 5 + 5;
-        const usize zi = 5;
-        
-        glm_vec3_copy((vec3) { (f32)xi, (f32)yi, (f32)zi }, transform.translation);
-        glm_vec3_copy((vec3) { 0.5f, 0.5f, 0.5f }, transform.scale);
-        glm_vec3_copy((vec3) { 0.f, 0.f, 0.f }, transform.rotation);
-        CreateInstance(
-            &transform,
-            &material,
-            &instances.data[i]
-        );
-    }
-    AddInstances(0, instances);
-
-    // Process embree geometry
-    COMMENT(Renderer.meshes.data[0].obj)
+    if (AppState.windowedMode) AddInstances(0, instances);
 
     const RTCDevice device = rtcNewDevice(NULL);
     if (!device) PANIC("error %d: cannot create device", rtcGetDeviceError(NULL));
     rtcSetDeviceErrorFunction(device, EmbreeErrorCallback, NULL);
 
+    if (rtcGetDeviceProperty(device, RTC_DEVICE_PROPERTY_RAY_MASK_SUPPORTED)) 
+        LOGLNM("RTC_DEVICE_PROPERTY_RAY_MASK_SUPPORTED is on");
+
     RTCScene scene = rtcNewScene(device);
+
+    RTCScene meshScene = rtcNewScene(device);
     RTCGeometry mesh = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
 
     LOGLNM("Allocating embree positions");
@@ -321,137 +416,173 @@ int main(void) {
         positions[i] = Renderer.meshes.data[0].obj.vertices[i].position;
     }
 
-    for (usize i = 0; i < Renderer.meshes.data[0].obj.nIndices; i++) {
-        indices[i / 3][0] = Renderer.meshes.data[0].obj.indices[i + 0];
-        indices[i / 3][1] = Renderer.meshes.data[0].obj.indices[i + 1];
-        indices[i / 3][2] = Renderer.meshes.data[0].obj.indices[i + 2];
+    for (usize i = 0; i < Renderer.meshes.data[0].obj.nIndices / 3; i++) {
+        indices[i][0] = Renderer.meshes.data[0].obj.indices[3 * i + 0];
+        indices[i][1] = Renderer.meshes.data[0].obj.indices[3 * i + 1];
+        indices[i][2] = Renderer.meshes.data[0].obj.indices[3 * i + 2];
     }
 
     rtcCommitGeometry(mesh);
 
     // Attach the geometry to the scene
-    rtcAttachGeometry(scene, mesh);
+    rtcAttachGeometry(meshScene, mesh);
     rtcReleaseGeometry(mesh);
+    rtcCommitScene(meshScene);
 
+    // Create Embree instnaces
+    for (usize i = 0; i < instances.len; i++) {
+        RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_INSTANCE);
+        rtcSetGeometryInstancedScene(geometry, meshScene);
+        // glm_mat4_transpose(instances.data[i].model);
+        rtcSetGeometryTransform(
+            geometry,
+            0,
+            RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR,
+            instances.data[i].model
+        );
+        rtcCommitGeometry(geometry);
+        rtcAttachGeometry(scene, geometry);
+        rtcReleaseGeometry(geometry);
+    }
+    
     // Commit the scene
     rtcCommitScene(scene);
 
-    Array(RTCGeometry) embreeInstances = AllocateArray(RTCGeometry, instances.len);
-    
-    // Create Embree instnaces
-    for (usize i = 0; i < instances.len; i++) {
-        embreeInstances.data[i] = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_INSTANCE);
-        rtcSetGeometryInstancedScene(embreeInstances.data[i], scene);
-        rtcSetGeometryTransform(embreeInstances.data[i], 0, RTC_FORMAT_FLOAT4X4_COLUMN_MAJOR, instances.data[i].model);
-    }
-
     COMMENT(---------===========[ Trace Rays ]===========---------)
 
-    RayTracer rayTracer = (RayTracer) {
+    RayTracer rt = (RayTracer) {
         .materials = AllocateArray(Material, instances.len),
-        .nMaxReflections = 30,
+        // .nMaxReflections = 1,
+        // .nRaysPerSample = 1,
+        .nMaxReflections = 15,
+        .nRaysPerSample = 30,
         .rtcScene = scene,
         .skyColor = { 0.5f, 0.7f, 1.0f },
     };
 
     for (usize i = 0; i < instances.len; i++) {
-        CreateLambertian(&rayTracer.materials.data[i], Palette1[i % ARRAY_LENGTH(Palette1)], (f32)i / instances.len);
+        CreateLambertian(&rt.materials.data[i], Palette1[i % ARRAY_LENGTH(Palette1)], 0.8f);
     }
 
-    Array(vec3) image = AllocateArray(vec3, AppState.width * AppState.height);
+    Array(Rgb256) buffer = AllocateArray(Rgb256, AppState.width * AppState.height);
+    Buffer2d framebuffer = (Buffer2d) {
+        .width = AppState.width,
+        .height = AppState.height,
+        .buffer = buffer.data
+    };
+
+    Tasks tasks = {
+        .pTasks = AllocateArray(PTask, Config.nWorkers),
+        .sTasks = (Array(STask)) { .len = 0 }
+    };
+
+    Display display = {
+        .tasks = tasks,
+        .start = time(NULL)
+    };
 
     vec3 lookDir;
     glm_vec3_copy(Renderer.camera.direction, lookDir);
 
-    u8 (*converted)[3] = malloc(AppState.width * AppState.height * 3);
-    for (int y = 0; y < AppState.height; ++y) {
-        LOGF("%.2f%%", ((f32)y / AppState.height));
-        for (int x = 0; x < AppState.width; ++x) {
-            struct RTCRayHit rayhit;
-            rayhit.ray.org_x = 0.0f;
-            rayhit.ray.org_y = 0.0f;
-            rayhit.ray.org_z = -1.0f;
+    Array(RenderJobParams) params = AllocateArray(RenderJobParams, Config.nWorkers);
+    Array(pthread_t) tids = AllocateArray(pthread_t, Config.nWorkers);
 
-            rayhit.ray.dir_x = (2.0f * ((f32)x / AppState.width)) - 1.0f;
-            rayhit.ray.dir_y = 1.0f - (2.0f * ((f32)y / AppState.height));
-            rayhit.ray.dir_z = 1.0f;
-            rayhit.ray.tnear = 0.001f;
-            rayhit.ray.tfar = INFINITY;
-            rayhit.ray.mask = 0xFFFFFFFF;
-            rayhit.ray.flags = 0;
-            rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
-
-            glm_vec3_one(image.data[y * AppState.width + x]);
-            TraceRay(&rayTracer, &rayhit, 0, image.data[y * AppState.width + x]);
-            converted[y * AppState.width + x][X] = (u8)(image.data[y * AppState.width + x][X] * 255.999f);
-            converted[y * AppState.width + x][Y] = (u8)(image.data[y * AppState.width + x][Y] * 255.999f);
-            converted[y * AppState.width + x][Z] = (u8)(image.data[y * AppState.width + x][Z] * 255.999f);
-        }
+    LOGLN("Starting" FS(usize) "worker threads", Config.nWorkers);
+    for (usize tid = 0; tid < Config.nWorkers; tid++) {
+        params.data[tid].tid = tid;
+        params.data[tid].framebuffer = framebuffer;
+        params.data[tid].rt = &rt;
+        params.data[tid].task = &display.tasks.pTasks.data[tid];
+        LOGLN("  * starting worker:" FS(usize), tid);
+        const i32 result = pthread_create(
+            &tids.data[tid],
+            NULL,
+            RenderJob,
+            &params.data[tid]
+        );
+        if (0 != result) PANIC("Failed to create worker" FS(usize), tid);
     }
-    PRINTLNM("");
+    LOGLNM("Waiting for worker threads to finish");
+    SetupDisplay(&display);
+    while(!FinishedDisplay(&display)) {
+        usleep(16 * 1000);
+        UpdateDisplay(&display);
+    }
+
+    // TODO: implement concurrent prograss bars
+    for (usize tid = 0; tid < Config.nWorkers; tid++) {
+        pthread_join(tids.data[tid], NULL);
+    }
+    
     LOGLNM("Tracing done");
 
-    i32 result = stbi_write_bmp("./test.bmp", AppState.width, AppState.height, 3, converted);
+    i32 result = stbi_write_bmp("./test.bmp", framebuffer.width, framebuffer.height, 3, framebuffer.buffer);
     if (result == 0) PANICM("image failed");
     else LOGLNM("Image written to file");
 
-    u32 texture;
-    glGenTextures(1, &texture); GL_ASSERT_NO_ERROR;
-    glBindTexture(GL_TEXTURE_2D, texture);
+    if (AppState.windowedMode) {
+        u32 texture;
+        glGenTextures(1, &texture); GL_ASSERT_NO_ERROR;
+        glBindTexture(GL_TEXTURE_2D, texture);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, AppState.width, AppState.height, 0, GL_RGB, GL_UNSIGNED_BYTE, converted); GL_ASSERT_NO_ERROR;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, AppState.width, AppState.height, 0, GL_RGB, GL_UNSIGNED_BYTE, framebuffer.buffer); GL_ASSERT_NO_ERROR;
 
-    u32 vao;
-    glGenVertexArrays(1, &vao); GL_ASSERT_NO_ERROR;
-    glBindVertexArray(vao);
+        u32 vao;
+        glGenVertexArrays(1, &vao); GL_ASSERT_NO_ERROR;
+        glBindVertexArray(vao);
 
-    const char* const vs = SHADER(
-        out vec2 texcoords;
-        out vec4 color;
+        const char* const vs = SHADER(
+            out vec2 texcoords;
+            out vec4 color;
 
-        void main() {
-            vec2 vertices[3]=vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1, 3));
-            gl_Position = vec4(vertices[gl_VertexID], 0, 1);
-            color = gl_Position;
-            texcoords = 0.5 * gl_Position.xy + vec2(0.5);
+            void main() {
+                vec2 vertices[3]=vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1, 3));
+                gl_Position = vec4(vertices[gl_VertexID], 0, 1);
+                color = gl_Position;
+                texcoords = 0.5 * gl_Position.xy + vec2(0.5);
+            }
+        );
+
+        const char* const fs = SHADER(
+            out vec4 FragColor;
+            
+            in vec4 color;
+            in vec2 texcoords;
+
+            uniform sampler2D ourTexture;
+
+            void main() {
+                FragColor = texture(ourTexture, texcoords) * color;
+            }
+        );
+
+        const u32 program = CreateProgram(vs, fs);
+        glUseProgram(program); GL_ASSERT_NO_ERROR;
+
+        while(true) { 
+            glDrawArrays(GL_TRIANGLES, 0, 3); GL_ASSERT_NO_ERROR;
+            LOGFM("Drawing ...");
+
+            glfwSwapBuffers(AppState.window);
         }
-    );
 
-    const char* const fs = SHADER(
-        out vec4 FragColor;
-        
-        in vec4 color;
-        in vec2 texcoords;
+        glDeleteVertexArrays(1, &vao);
+        glDeleteProgram(program);
 
-        uniform sampler2D ourTexture;
-
-        void main() {
-            FragColor = texture(ourTexture, texcoords) * color;
-        }
-    );
-
-    const u32 program = CreateProgram(vs, fs);
-    glUseProgram(program); GL_ASSERT_NO_ERROR;
-
-    while(1) { 
-        glDrawArrays(GL_TRIANGLES, 0, 3); GL_ASSERT_NO_ERROR;
-        LOGFM("Drawing ...");
-
-        glfwSwapBuffers(window);
+        glfwDestroyWindow(AppState.window);
+        glfwTerminate();
     }
 
+    FreeArray(tasks.pTasks);
+    FreeArray(buffer);
+
     rtcReleaseScene(scene);
+    rtcReleaseScene(meshScene);
     rtcReleaseDevice(device);
-
-    glDeleteVertexArrays(1, &vao);
-    glDeleteProgram(program);
-
-    glfwDestroyWindow(window);
-    glfwTerminate();
     exit(EXIT_SUCCESS);
 }

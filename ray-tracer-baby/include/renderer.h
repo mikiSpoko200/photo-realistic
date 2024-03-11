@@ -37,6 +37,7 @@ typedef struct {
 
 typedef struct {
     usize nMeshes;
+    bool useGl;
     const char* const * const objPaths;
     const char* vs;
     const char* fs;
